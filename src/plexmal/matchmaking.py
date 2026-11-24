@@ -89,7 +89,7 @@ def anilist_multi(titles, log=None, rl=None):
     q = "query(" + ",".join(f"${a}:String!" for a in vars_) + ")" + "{" + ",".join(sel) + "}"
     if rl:
         rl.wait()
-    st, j, _ = http("POST", ANILIST, json_body={"query": q, "variables": vars_}, retries=2, log=log)
+    st, j, _ = http("POST", ANILIST, json_body={"query": q, "variables": vars_}, retries=5, log=log)
     if st != 200 or not isinstance(j, dict):
         if log:
             log.warn(f"anilist {titles!r} -> HTTP {st} {truncate(str(j), 140)}")

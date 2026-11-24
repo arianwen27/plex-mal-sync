@@ -48,4 +48,4 @@ season_chains = true             # map Plex seasons -> MAL per-season entries
 
 # Politeness ------------------------------------------------------------
 request_gap_seconds = 1.5        # min gap between MAL API calls
-resolve_gap_seconds = 1.0        # min gap between AniList/Shikimori calls
+resolve_gap_seconds = 2.6        # min gap between AniList/Shikimori calls (AniList 429s hard)
