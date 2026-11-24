@@ -1,0 +1,24 @@
+# --- never commit personal / secret things -------------------------------
+config.toml
+overrides.toml
+data/
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+tokens.json
+*.env
+*.log
+reports/
+backups/
+# --- python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.idea/
+.vscode/
+# --- os --------------------------------------------------------------------
+Thumbs.db
+.DS_Store

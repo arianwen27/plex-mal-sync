@@ -1,0 +1,51 @@
+# ============================================================
+#  plex-mal-sync configuration
+#  Copy to config.toml and edit. config.toml is git-ignored:
+#  your keys, usernames and paths never leave this machine.
+# ============================================================
+
+[plex]
+# Path to the PMS library DB. It is opened READ-ONLY (mode=ro) - Plex is untouched.
+# Windows example:
+db_path = 'C:\Users\you\AppData\Local\Plex Media Server\Plug-in Support\Databases\com.plexapp.plugins.library.db'
+# Linux example:
+# db_path = '/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db'
+url = 'http://127.0.0.1:32400'
+# Leave token blank to auto-detect (.LocalAdminToken, then Preferences.xml).
+token = ''
+# Only these Plex library sections are ever considered (match the title in Plex):
+libraries = ['Anime']
+# Which Plex accounts count as "me". Everyone else on a shared server is ignored.
+accounts = ['YourPlexUsername']
+# Cross-check finished state against the Plex API (extra GETs, more accurate).
+confirm_complete_play = true
+complete_threshold_pct = 90
+ignore_season_zero = true          # season 0 = specials; left alone by default
+
+[mal]
+# https://myanimelist.net/apiconfg -> Create ID
+client_id = ''
+client_secret = ''
+redirect_uri = 'http://localhost:8765/callback'
+# Optional: MAL website -> Settings -> "Export Data" file (.zip/.json/.csv).
+# Lets you build "what is missing" reports without authorising the API.
+export_path = ''
+
+[sync]
+# Hard safety rails -----------------------------------------------------
+never_decrease = true            # absolute: watched counts only ever go up
+allow_new_entries = true         # add shows to MAL that Plex has but MAL doesn't
+mark_completed_at_full = true    # status=completed once watched == total episodes
+status_policy = 'conservative'   # conservative | auto
+                                 #   conservative: only plan_to_watch/absent -> watching/completed
+skip_adult = true                # never auto-add adult entries
+min_confidence = 0.75            # below this -> review queue, never written
+ambiguity_margin = 0.08          # runner-up too close -> review queue
+max_new_entries_per_run = 15
+max_episode_bump = 26
+max_writes_per_run = 25
+season_chains = true             # map Plex seasons -> MAL per-season entries
+
+# Politeness ------------------------------------------------------------
+request_gap_seconds = 1.5        # min gap between MAL API calls
+resolve_gap_seconds = 1.0        # min gap between AniList/Shikimori calls
