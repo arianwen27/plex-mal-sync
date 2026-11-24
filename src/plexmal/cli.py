@@ -146,6 +146,7 @@ def cmd_resolve(a, cfg, store, log):
     facts = engine.scan(cfg, store, log)
     rl = __import__("plexmal.util", fromlist=["Ratelimit"]).Ratelimit(cfg.sync.get("resolve_gap_seconds", 1.0))
     from . import matchmaking
+    matchmaking.load_cache(json.loads(store.get_meta("rescache", "{}") or "{}"))
     todo = []
     for f in facts:
         if f["completed_total"] <= 0:
@@ -187,6 +188,7 @@ def cmd_resolve(a, cfg, store, log):
         print(f"  [{flag}] {f['plex_title'][:38]:<40} {('S%s' % season) if season else 'ALL':<4} "
               f"{str(cand.get('mal_id') or '-'):<8} {(cand.get('titles') or ['-'])[0][:34]:<36} "
               f"{res.get('score', 0):.2f} {res.get('reason', '')[:38]}")
+    store.set_meta("rescache", json.dumps(matchmaking.dump_cache()))
     print(f"\nauto-mapped {ok}, needs review {bad}")
     print("review file:", write_review(cfg, store))
     return 0

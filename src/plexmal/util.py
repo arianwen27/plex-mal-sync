@@ -199,10 +199,12 @@ def sim(a: str, b: str) -> float:
     inter = len(ta & tb)
     jac = inter / max(1, len(ta | tb))
     cov = inter / max(1, min(len(ta), len(tb)))  # containment: short title inside long one
-    cont = 0.0
+    cand = [r, 0.75 * jac + 0.25 * r, 0.55 * cov + 0.45 * r]
     if a in b or b in a:
-        cont = 0.94
-    cand = [r, 0.75 * jac + 0.25 * r, 0.55 * cov + 0.45 * r, cont]
+        # a substring hit is weaker when the other title has substantially more words
+        # ("chainsmoker cat" vs "chainsmoker cat minis" must not read as an exact match)
+        ratio = min(len(a), len(b)) / max(len(a), len(b))
+        cand.append(0.94 * ratio)
     return max(cand)
 
 

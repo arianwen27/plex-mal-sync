@@ -32,11 +32,23 @@ query($s:String!){
 _AL_FIELDS = ("id", "idMal", "isAdult", "format", "status", "season", "seasonYear",
               "episodes", "duration", "countryOfOrigin", "title", "synonyms")
 
+_POOL_CACHE = {}
+
+
+def load_cache(d):
+    """Reuse previously fetched candidate pools (keeps re-runs fast and polite)."""
+    global _POOL_CACHE
+    _POOL_CACHE = dict(d or {})
+
+
+def dump_cache():
+    return _POOL_CACHE
+
 
 def _cand(source, **kw):
     c = {"source": source, "mal_id": None, "anilist_id": None, "titles": [], "year": None,
          "episodes": None, "fmt": None, "status": None, "adult": False, "country": None,
-         "relations": []}
+         "popularity": None, "relations": []}
     c.update(kw)
     return c
 
@@ -55,25 +67,48 @@ def _titles(raw):
 
 
 def anilist_candidates(title, log=None, rl=None):
+    return anilist_multi([title], log, rl)
+
+
+def anilist_multi(titles, log=None, rl=None):
+    """One GraphQL request for up to 4 title variants (aliased queries)."""
+    titles = [t for t in dict.fromkeys(titles or []) if t][:4]
+    if not titles:
+        return []
+    key = "||".join(titles).lower()
+    if key in _POOL_CACHE:
+        return _POOL_CACHE[key]
+    vars_, sel = {}, []
+    for i, t in enumerate(titles):
+        a = f"q{i}"
+        vars_[a] = t
+        sel.append(f"{a}: Page(perPage:8){{ media(search:${a},type:ANIME,sort:SEARCH_MATCH) {{ " \
+                   f"id idMal isAdult format status season seasonYear episodes popularity countryOfOrigin " \
+                   f"title{{romaji english native}} synonyms relations{{edges{{relationType " \
+                   f"node{{id idMal isAdult format status season seasonYear episodes title{{romaji english}}}}}}}} }} }}")
+    q = "query(" + ",".join(f"${a}:String!" for a in vars_) + ")" + "{" + ",".join(sel) + "}"
     if rl:
         rl.wait()
-    st, j, _ = http("POST", ANILIST, json_body={"query": _ANILIST_Q, "variables": {"s": title}}, retries=2, log=log)
+    st, j, _ = http("POST", ANILIST, json_body={"query": q, "variables": vars_}, retries=2, log=log)
     if st != 200 or not isinstance(j, dict):
         if log:
-            log.warn(f"anilist {title!r} -> HTTP {st} {truncate(str(j), 120)}")
+            log.warn(f"anilist {titles!r} -> HTTP {st} {truncate(str(j), 140)}")
         return []
-    media = (((j.get("data") or {}).get("Page") or {}).get("media")) or []
     out = []
-    for m in media:
-        rels = []
-        for e in (m.get("relations") or {}).get("edges") or []:
-            n = e.get("node") or {}
-            rels.append({"rel": e.get("relationType"), **{k: n.get(k) for k in _AL_FIELDS}})
-        out.append(_cand("anilist",
-                         anilist_id=m.get("id"), mal_id=m.get("idMal"), adult=bool(m.get("isAdult")),
-                         fmt=m.get("format"), status=m.get("status"), year=m.get("seasonYear"),
-                         episodes=m.get("episodes"), country=m.get("countryOfOrigin"),
-                         titles=_titles(m), relations=rels))
+    for k in [f"q{i}" for i in range(len(titles))]:
+        node = (j.get("data") or {}).get(k) or {}
+        # aliased GraphQL: the alias IS the Page object, so media sits directly under it
+        media = node.get("media") or ((node.get("Page") or {}).get("media")) or []
+        for m in media:
+            rels = []
+            for e in (m.get("relations") or {}).get("edges") or []:
+                n = e.get("node") or {}
+                rels.append({"rel": e.get("relationType"), **{x: n.get(x) for x in _AL_FIELDS}})
+            out.append(_cand("anilist", anilist_id=m.get("id"), mal_id=m.get("idMal"),
+                             adult=bool(m.get("isAdult")), fmt=m.get("format"), status=m.get("status"),
+                             year=m.get("seasonYear"), episodes=m.get("episodes"), popularity=m.get("popularity"),
+                             country=m.get("countryOfOrigin"), titles=_titles(m), relations=rels))
+    _POOL_CACHE[key] = out
     return out
 
 
@@ -81,7 +116,7 @@ def shikimori_candidates(title, log=None, rl=None):
     if rl:
         rl.wait()
     st, j, _ = http("GET", "https://shikimori.one/api/animes",
-                    params={"search": title, "limit": 6, "censored": 1 if False else None}, retries=1, log=log)
+                    params={"search": title, "limit": 6}, retries=1, log=log)
     if st != 200 or not isinstance(j, list):
         if log:
             log.warn(f"shikimori {title!r} -> HTTP {st} {truncate(str(j), 100)}")
@@ -127,14 +162,70 @@ def _year_of(c):
     return c.get("year") or None
 
 
-def score_candidate(c, queries, plex_year, season, watched, cross_ids, skip_adult, sibling_ids):
+_ROM = {"ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6, "vii": 7, "viii": 8, "ix": 9, "x": 10,
+        "xi": 11, "xii": 12, "iiInd": 2}
+
+
+def season_hint(text):
+    """Which season number is encoded in a title ('2nd Season', 'II', 'Part 2', 'Psycho-Pass 2').
+
+    Deliberately conservative: a one-word title like '86' must not become season 86.
+    """
+    t = " " + re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip() + " "
+    m = re.findall(r"(?:season|staffel|cour|part)[\s:.\-]*(\d{1,2})", t)
+    if m:
+        return int(m[-1])
+    m = re.findall(r"(\d{1,2})(?:st|nd|rd|th)\s+(?:season|part|cour)", t)
+    if m:
+        return int(m[-1])
+    toks = t.split()
+    for w in toks:
+        if w in _ROM:
+            return _ROM[w]
+    if len(toks) >= 2:
+        m = re.findall(r"(\d{1,2})\s*$", t)
+        if m and 1 < int(m[-1]) <= 12:
+            return int(m[-1])
+    return None
+
+
+def best_title_match(queries, titles):
+    """(similarity, season-hint of the title that matched best)."""
+    best, hint, seen = 0.0, None, set()
+    for t in titles:
+        nt = norm_title(t)
+        if not nt or nt in seen:
+            continue
+        seen.add(nt)
+        s = max((sim(q, nt) for q in queries), default=0.0)
+        if s > best:
+            best, hint = s, season_hint(t)
+    return best, hint
+
+
+def score_candidate(c, queries, plex_year, season, watched, cross_ids, skip_adult, sibling_ids, orig=None):
     """Return (score 0..~1.2, reasons list, hard_reject bool)."""
     reasons = []
-    base = best_sim(queries, [norm_title(t) for t in c["titles"] if t])
+    base, hint = best_title_match(queries, c["titles"])
     if base < 0.50:
         return base, [f"title_sim={base:.2f} too low"], True
     s = base
     reasons.append(f"title={base:.2f}")
+
+    # season markers are decisive when a Plex show spans several seasons
+    if season and season > 1:
+        if hint == season:
+            s += 0.20
+            reasons.append(f"season_hint={hint}")
+        elif hint is not None:
+            s -= 0.45
+            reasons.append(f"season_hint{hint}_not_S{season}")
+    elif season is None and hint and hint > 1:
+        s -= 0.28
+        reasons.append(f"looks_like_season_{hint}")
+    elif season == 1 and hint and hint > 1:
+        s -= 0.20
+        reasons.append(f"looks_like_season_{hint}")
 
     if c["mal_id"]:
         s += 0.06
@@ -151,6 +242,35 @@ def score_candidate(c, queries, plex_year, season, watched, cross_ids, skip_adul
     if eps and watched and eps < watched:
         reasons.append(f"episodes({eps})<watched({watched})")
         return 0.0, reasons, True
+    if eps and watched:
+        if eps == watched:
+            s += 0.12
+            reasons.append("eps_match")
+        elif eps >= watched and eps <= watched * 1.35:
+            s += 0.05
+            reasons.append("eps_plausible")
+
+    # a real series outranks a PV / mini-anime / trailer with a similar name
+    pop = c.get("popularity")
+    if pop:
+        if pop <= 2000:
+            s += 0.12
+            reasons.append(f"pop={pop}")
+        elif pop <= 8000:
+            s += 0.06
+            reasons.append(f"pop={pop}")
+        elif pop > 40000:
+            s -= 0.10
+            reasons.append(f"pop={pop}")
+
+    # Plex keeps the Japanese title: matching it against native titles is strong evidence
+    if orig:
+        for t in c["titles"]:
+            v = sim(orig, norm_title(t))
+            if v > base:
+                base, s = max(base, v), max(s, v + 0.10)
+                reasons.append(f"native={v:.2f}")
+                break
 
     y = _year_of(c)
     if y and plex_year:
@@ -248,23 +368,22 @@ def season_chain(anilist_id, log=None, rl=None, depth=8):
 def resolve_season(cfg, log, rl, show, season, watched, other_seasons, sibling_ids=()):
     """Resolve one (show, season) -> best MAL candidate + confidence + alternatives."""
     skip_adult = bool(cfg.sync.get("skip_adult", True))
-    titles = [show["plex_title"]]
+    pt = (show.get("plex_title") or "").strip()
+    if not pt or pt.lower().startswith(("plex://", "rk:", "local://")):
+        # history for a show that is no longer in the library: there is no title to match on
+        return {"state": "ignored", "score": 0.0, "cand": None, "alternatives": [],
+                "reason": "no usable Plex title (show removed from the library?)"}
+    titles = [pt]
     if show.get("original_title"):
         titles.append(show["original_title"])
     if season and season > 1:
         titles += [f"{show['plex_title']} season {season}", f"{show['plex_title']} {roman(season)}"]
     queries = list(dict.fromkeys(norm_title(t) for t in titles if t))
 
-    pool = []
-    seen_q = set()
-    for q in titles:
-        if q.lower() in seen_q:
-            continue
-        seen_q.add(q.lower())
-        pool += anilist_candidates(q, log, rl)
-        pool += shikimori_candidates(q, log, rl)
-        if len(queries) >= 3:
-            break
+    pool = anilist_multi(titles, log, rl)
+    pool += shikimori_candidates(show["plex_title"], log, rl)
+    if show.get("original_title") and norm_title(show["original_title"]) not in queries:
+        pool += shikimori_candidates(show["original_title"], log, rl)
     pool += mal_search_candidates(cfg, show["plex_title"], log, rl)
     pool = _dedupe(pool)
 
@@ -274,10 +393,11 @@ def resolve_season(cfg, log, rl, show, season, watched, other_seasons, sibling_i
             cross[c["mal_id"]] = cross.get(c["mal_id"], 0) + 1
     cross_ids = {k for k, v in cross.items() if v >= 2}
 
+    orig_norm = norm_title(show.get("original_title") or "")
     scored = []
     for c in pool:
         sc, why, rej = score_candidate(c, queries, show.get("year"), season, watched,
-                                       cross_ids, skip_adult, set(sibling_ids or ()))
+                                       cross_ids, skip_adult, set(sibling_ids or ()), orig=orig_norm)
         if rej:
             continue
         scored.append({"score": round(sc, 4), "why": why, "cand": c})

@@ -26,10 +26,17 @@ def find_token(cfg, log):
     t = (cfg.plex.get("token") or "").strip()
     if t:
         return t, "config"
+    # the PMS data dir is a few levels above the DB file, and its name is not always
+    # literally "Plex Media Server" (custom redirects), so walk up and test each level.
     roots = []
     db = cfg.plex.get("db_path") or ""
     if db:
-        roots.append(os.path.dirname(os.path.dirname(os.path.abspath(db))))
+        d = os.path.abspath(db)
+        for _ in range(5):
+            d = os.path.dirname(d)
+            if not d:
+                break
+            roots.append(d)
     env = os.environ.get("LOCALAPPDATA")
     if env:
         roots.append(os.path.join(env, "Plex Media Server"))

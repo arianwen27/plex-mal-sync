@@ -219,6 +219,7 @@ def build_plan(cfg, store, log, facts, mal_entries, do_resolve=True, show_noop=F
     S = cfg.sync
     ov = cfg.overrides()
     rl = Ratelimit(S.get("resolve_gap_seconds", 1.0))
+    matchmaking.load_cache(json.loads(store.get_meta("rescache", "{}") or "{}"))
     plan = {"created": now(), "items": [], "review": [], "blocked": [], "noop": [],
             "skipped": [], "mal_source": None, "stats": {}}
 
@@ -386,6 +387,7 @@ def build_plan(cfg, store, log, facts, mal_entries, do_resolve=True, show_noop=F
         keep.append(it)
     plan["items"] = keep
 
+    store.set_meta("rescache", json.dumps(matchmaking.dump_cache()))
     plan["hash"] = plan_hash(plan)
     plan["stats"] = {
         "writes": len(plan["items"]), "new_entries": sum(1 for i in plan["items"] if i["action"] == "new_entry"),

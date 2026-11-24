@@ -146,6 +146,7 @@ class Store:
                     mal_title=None, source=None, confidence=None, evidence=None,
                     alternatives=None, state="needs_review", created_at=now(), updated_at=now())
         cols.update({k: v for k, v in kw.items() if k in cols})
+        cols["mkey"] = mkey
         cols["updated_at"] = now()
         self.con.execute(
             """INSERT INTO mappings(mkey,gp_guid,plex_title,season,mal_id,anilist_id,mal_title,source,
