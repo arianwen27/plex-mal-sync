@@ -353,13 +353,16 @@ def build_plan(cfg, store, log, facts, mal_entries, do_resolve=True, show_noop=F
                     item["mal_title"] = item["mal_title"] or info.get("title")
                     item["total_episodes"] = info.get("num_episodes")
 
-            if not item["total_episodes"]:
+            if not entry:
                 # new entries have no cap yet; without one a finished series would be
                 # filed as "watching" and the grouping check could not run
                 c = canonical(item["mal_id"])
                 if c:
-                    item["mal_title"] = item["mal_title"] or c.get("title")
-                    item["total_episodes"] = c.get("num_episodes") or None
+                    item["total_episodes"] = item["total_episodes"] or c.get("num_episodes") or None
+                    # MAL's own title beats a matcher title: AniList's "romaji" for
+                    # Kakegurui Twin is literally a Thai title, which made the report
+                    # unreadable. The matcher title is still kept in `evidence`.
+                    item["mal_title"] = c.get("title") or item["mal_title"]
                     item["mal_adult"] = bool(c.get("nsfw"))
 
             target = watched
