@@ -310,6 +310,11 @@ def build_plan(cfg, store, log, facts, mal_entries, do_resolve=True, show_noop=F
             if entry:
                 item["mal_title"] = item["mal_title"] or entry.get("title")
                 item["total_episodes"] = int(entry.get("total_episodes") or 0) or None
+                if entry.get("watched") is None or not entry.get("watched_known", True):
+                    item["flags"].append("MAL did not report a watched-episode count for this entry. "
+                                         "Guessing 0 here is what rewrites whole lists, so it is blocked.")
+                    plan["blocked"].append(item)
+                    continue
                 item["cur_watched"] = int(entry.get("watched") or 0)
                 item["cur_status"] = entry.get("status")
             else:
@@ -341,7 +346,8 @@ def build_plan(cfg, store, log, facts, mal_entries, do_resolve=True, show_noop=F
                     continue
                 full = bool(cap and target >= cap and S.get("mark_completed_at_full", True))
                 ns = "completed" if full else (S.get("new_entry_status") or "watching")
-            elif S.get("mark_completed_at_full", True) and cap and target >= cap and cur != "completed" \
+            elif S.get("mark_completed_at_full", True) and cap and target >= cap \
+                    and item["cur_status"] != "completed" \
                     and item["cur_status"] not in ("dropped",):
                 ns = "completed"
             if ns == "watching" and (item["cur_status"] or "") in ("on_hold", "dropped", "completed") \
@@ -425,11 +431,19 @@ def apply_plan(cfg, store, log, plan, confirm=None, force=False, mal=None, max_c
 
     run_id = time.strftime("%Y%m%d_%H%M%S") + "_" + (plan.get("hash") or "x")
     written = failed = skipped = 0
+    expect = []
     for it in items:
         if max_calls and (written + failed) >= max_calls:
             log.warn("hit --max-calls, stopping")
             break
         cur = live_by_id.get(it["mal_id"])
+        if cur is not None and cur.get("watched") is None:
+            log.error(f"SKIP anime/{it['mal_id']}: MAL did not report the live watched count, so "
+                      f"'never decrease' cannot be verified. Nothing written.")
+            store.log_applied(run_id, it["mal_id"], it["action"], "{}", "{}", False,
+                              "skipped: live watched count unknown")
+            skipped += 1
+            continue
         cur_w = int((cur or {}).get("watched") or 0)
         cur_s = (cur or {}).get("status")
         before = {"watched": cur_w, "status": cur_s, "existed": bool(cur)}
@@ -453,12 +467,33 @@ def apply_plan(cfg, store, log, plan, confirm=None, force=False, mal=None, max_c
                           ok, f"HTTP {st}")
         if ok:
             written += 1
+            expect.append((it["mal_id"], it["new_watched"], fields.get("status"), cur_w, cur_s))
             log.info(f"  ok  anime/{it['mal_id']} {it['mal_title'] or ''} "
-                     f"-> {fields.get('num_watched_episodes', cur_w)} eps "
+                     f"{cur_w}->{fields.get('num_watched_episodes', cur_w)} eps "
                      f"{('/' + fields['status']) if fields.get('status') else ''}")
         else:
             failed += 1
             log.error(f"  FAIL anime/{it['mal_id']} -> HTTP {st} {truncate(str(body), 160)}")
+
+    # ---- read the list back and prove every write actually landed
+    mismatches = []
+    if expect:
+        try:
+            back = mal.my_list()
+        except Exception as e:
+            back, mismatches = None, [f"could not re-read the list to verify writes: {e}"]
+        for mal_id, want_w, want_s, was_w, was_s in (expect if back else []):
+            got = (back or {}).get(mal_id) or {}
+            gw, gs = got.get("watched"), got.get("status")
+            if gw is None or gw != want_w or (want_s and gs != want_s):
+                mismatches.append(f"anime/{mal_id}: asked for {want_w} eps"
+                                  + (f"/{want_s}" if want_s else "") + f", MAL now says {gw}/{gs}")
+        if mismatches:
+            log.error("VERIFY FAILED after apply:\n    " + "\n    ".join(mismatches))
+            log.error("Your list may be partly updated. Restore from the backup: " + str(bpath))
+        else:
+            log.info(f"verify ok: re-read {len(back or {})} entries, all {len(expect)} write(s) "
+                     f"landed exactly as planned")
     log.info(f"apply done: {written} written, {failed} failed, {skipped} skipped. "
              f"backup: {bpath}")
     store.set_meta("last_apply_run", run_id)
@@ -481,9 +516,16 @@ def undo_last(cfg, store, log, mal=None, dry=True):
         except Exception:
             before = {}
         fields = {}
+        if before.get("watched") is None and not before.get("existed"):
+            log.info(f"  skip anime/{r['mal_id']}: nothing was recorded as written before it")
+            continue
         if before.get("existed") and before.get("status"):
             fields["status"] = before["status"]
-        fields["num_watched_episodes"] = int(before.get("watched") or 0)
+        if before.get("watched") is None:
+            log.warn(f"  anime/{r['mal_id']}: the pre-write watched count was never recorded - "
+                     f"leaving its episode count alone rather than writing 0")
+        else:
+            fields["num_watched_episodes"] = int(before.get("watched") or 0)
         note = "" if before.get("existed") else " (created by us: MAL has no delete API - set to 0 eps, " \
                                              "remove the entry yourself if you want it gone)"
         log.info(f"  restore anime/{r['mal_id']} -> {fields}{note}")

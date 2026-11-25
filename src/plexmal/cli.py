@@ -58,7 +58,13 @@ def main(argv=None):
     p.add_argument("--yes", action="store_true", help="actually do it (default is a dry run)")
 
     p = sub.add_parser("login", help="OAuth authorisation against MyAnimeList")
-    p.add_argument("--manual", action="store_true", help="paste the redirect URL instead of a local callback server")
+    p.add_argument("--manual", action="store_true", help="paste the redirect URL interactively")
+    p.add_argument("--paste", default="", help="finish an in-progress flow: paste the redirect URL or code")
+    p.add_argument("--url-only", action="store_true", help="just print the URL, do not listen for the callback")
+    p.add_argument("--paste-file", default="", metavar="PATH",
+                   help="finish an in-progress flow: read the redirect URL from a file (no shell quoting)")
+    p.add_argument("--timeout", type=int, default=900, help="seconds to wait for the browser callback")
+    p.add_argument("--fresh", action="store_true", help="throw away the authorisation in progress and start over")
 
     p = sub.add_parser("watch", help="loop: scan + plan (optionally apply) every N minutes")
     p.add_argument("--interval", type=int, default=15, help="minutes")
@@ -267,7 +273,30 @@ def cmd_undo(a, cfg, store, log):
 
 def cmd_login(a, cfg, store, log):
     m = malapi.MAL(cfg, log)
-    m.login(manual=a.manual)
+    pasted = a.paste or ""
+    if getattr(a, "paste_file", ""):
+        try:
+            with open(a.paste_file, "r", encoding="utf-8", errors="replace") as fh:
+                pasted = fh.read().strip()
+        except OSError as e:
+            print("cannot read %s: %s" % (a.paste_file, e))
+            return 2
+        if not pasted:
+            print("%s is empty" % a.paste_file)
+            return 2
+        os.remove(a.paste_file)  # the URL holds a one-time code - don't leave it lying around
+    if m.ready() and not (pasted or a.url_only):
+        try:
+            me = m.whoami()
+            print("already authorised as:", (me or {}).get("name"), "| id", (me or {}).get("id"))
+            print("(to re-authorise, delete data/mal_tokens.json and run login again)")
+            return 0
+        except Exception:
+            log.warn("saved token does not work - running the browser flow again")
+    got = m.login(manual=a.manual, paste=(pasted or None), url_only=a.url_only,
+                  timeout=a.timeout, reuse=not a.fresh)
+    if got is None:
+        return 0
     try:
         me = m.whoami()
         print("authorised as:", (me or {}).get("name"), "| id", (me or {}).get("id"))
