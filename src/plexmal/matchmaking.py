@@ -46,6 +46,28 @@ VARIANT_RE = re.compile(
     r"specials?\b|\bspecials\b|commentary|footage|collab)", re.I)
 
 
+# what may follow a short title after a bare space before it is still the same show
+SEASONISH_RE = re.compile(r"(?i)^(ii|iii|iv|v|vi|vii|viii|ix|x|xi|xii|\d+(st|nd|rd|th)?|part|"
+                          r"season|s\d+|ova|oad|movie|film|premiere|ex|plus|zero|0|final|end|"
+                          r"kou|ni|dai|2nd|3rd)\b")
+
+
+def _short_title_ok(raw, q):
+    """Is `raw` really the series called `q` (both lowercase), not just something
+    that happens to contain the word? 'gate' -> 'Gate: Jieitai...' yes;
+    'gate' -> 'Gatekeepers' / 'Gate Keepers' / 'Black Gate' no."""
+    r = str(raw or "").strip().lower()
+    if not r.startswith(q):
+        return False
+    rest = r[len(q):]
+    if not rest.strip():
+        return True                                   # the title *is* the series
+    seps = ":;-–'\"(,./&!?+|="
+    if rest[0] in seps or (rest.lstrip() and rest.lstrip()[0] in seps):
+        return True                                   # "gate: jieitai", "gate -the golden age-"
+    return bool(SEASONISH_RE.match(norm_title(rest)))  # "86 part 2", "86 ii"
+
+
 def variant_title(cand):
     """The title that marks this candidate as a spin-off/promo entry, else None."""
     for t in (cand.get("titles") or []):
@@ -238,25 +260,10 @@ def score_candidate(c, queries, plex_year, season, watched, cross_ids, skip_adul
     # with them (or equals them), not merely contains them.
     short = [q for q in (norm_title(x) for x in queries) if 0 < len(q) <= 5]
     if short:
-        hit = False
-        for t in (c["titles"] or []):
-            nt = norm_title(t)
-            for q in short:
-                if nt == q or nt.startswith(q + " ") or nt.startswith(q + ":") \
-                        or nt.startswith(q + "-") or nt.startswith(q + "'"):
-                    hit = True
-        if not hit:
+        if not any(_short_title_ok(t, q) for t in (c["titles"] or []) for q in short):
             return base, [f"short title '{short[0]}' is not a prefix of this entry"], True
 
-    # A very short Plex title ("Gate", "86") substring-matches half the database - that is
-    # how Plex's "Gate" got paired with MAL's unrelated "Hei Men (Black Gate)". For short
-    # titles demand that the candidate title really be the series, not merely contain the word.
-    short = [n for n in (norm_title(q) for q in queries) if 0 < len(n) <= 5]
-    if short:
-        hit = any(norm_title(t) == q or norm_title(t).startswith(q + (" ", "-", ":"))
-                  for t in c["titles"] for q in short)
-        if not hit:
-            return base, [f"short title '{short[0]}' is not a prefix of this candidate"], True
+    # (a duplicate of the short-title guard above was removed here - it crashed resolve)
 
     # season markers are decisive when a Plex show spans several seasons
     if season and season > 1:
@@ -430,15 +437,28 @@ def resolve_season(cfg, log, rl, show, season, watched, other_seasons, sibling_i
     titles = [pt]
     if show.get("original_title"):
         titles.append(show["original_title"])
+    # Plex names each season from TMDB data, and that name is often the sub-series itself:
+    # "Tokyo Ghoul √A", "Kyoto Saga", "-Shimane Illuminati Saga-". That is exactly what
+    # tells a Plex S3 apart from the S1 of the same show, so search and score on it.
+    stitle = next((str(s.get("season_title") or "").strip() for s in (show.get("seasons") or [])
+                   if s.get("season") == season), "")
+    if stitle and not re.fullmatch(r"(?i)(season|stagione|staffel)\s*\d+", stitle):
+        titles.append(stitle)
+        if norm_title(stitle) != norm_title(pt):
+            titles.append(f"{pt} {stitle}")
     if season and season > 1:
         titles += [f"{show['plex_title']} season {season}", f"{show['plex_title']} {roman(season)}"]
     queries = list(dict.fromkeys(norm_title(t) for t in titles if t))
 
     pool = anilist_multi(titles, log, rl)
     pool += shikimori_candidates(show["plex_title"], log, rl)
+    if stitle and norm_title(stitle) != norm_title(show["plex_title"]):
+        pool += shikimori_candidates(stitle, log, rl)
     if show.get("original_title") and norm_title(show["original_title"]) not in queries:
         pool += shikimori_candidates(show["original_title"], log, rl)
     pool += mal_search_candidates(cfg, show["plex_title"], log, rl)
+    if stitle and norm_title(stitle) != norm_title(show["plex_title"]):
+        pool += mal_search_candidates(cfg, stitle, log, rl)
     pool = _dedupe(pool)
 
     cross = {}
