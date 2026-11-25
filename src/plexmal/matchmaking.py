@@ -182,19 +182,28 @@ def mal_search_candidates(cfg, title, log=None, rl=None):
         rl.wait()
     st, j, _ = http("GET", "https://api.myanimelist.net/v2/anime",
                     params={"q": title, "limit": 8, "nsfw": "true",
-                            "fields": "id,title,main_episode_count,status,start_season,adult"},
+                            "fields": "id,title,synonyms,alternative_titles,media_type,"
+                                      "main_episode_count,num_episodes,status,start_season,adult"},
                     headers={"X-MAL-CLIENT-ID": cid}, retries=1, log=log)
     if st != 200 or not isinstance(j, dict):
         if log:
             log.warn(f"mal search {title!r} -> HTTP {st} {truncate(str(j), 120)}")
         return []
     out = []
-    for e in j.get("data") or []:
+    for idx, e in enumerate(j.get("data") or []):
         d = e.get("node") or {}
         ss = d.get("start_season") or {}
-        out.append(_cand("mal", mal_id=d.get("id"), titles=[d.get("title")] + list(d.get("synonyms") or []),
-                         episodes=d.get("main_episode_count"), fmt=(d.get("media_type") or "").upper() or None,
-                         year=ss.get("year"), status=(d.get("status") or "").upper(), adult=bool(d.get("adult"))))
+        alt = d.get("alternative_titles") or {}
+        # MAL's `title` is romaji ("Hataraku Saibou") while Plex/TMDB use the official
+        # English ("Cells at Work!"). Without alternative_titles there is no textual
+        # bridge at all between them and the real entry gets rejected as unrelated.
+        titles = [d.get("title"), alt.get("en"), alt.get("ja")]
+        titles += list(alt.get("synonyms") or []) + list(d.get("synonyms") or [])
+        out.append(_cand("mal", mal_id=d.get("id"), titles=[t for t in titles if t],
+                         episodes=d.get("num_episodes") or d.get("main_episode_count"),
+                         fmt=(d.get("media_type") or "").upper() or None,
+                         year=ss.get("year"), status=(d.get("status") or "").upper(),
+                         adult=bool(d.get("adult")), rank=idx, mal_rank=idx))
     return out
 
 
@@ -249,10 +258,20 @@ def score_candidate(c, queries, plex_year, season, watched, cross_ids, skip_adul
     """Return (score 0..~1.2, reasons list, hard_reject bool)."""
     reasons = []
     base, hint = best_title_match(queries, c["titles"])
-    if base < 0.50:
+    # MAL's own search is the only source that knows Plex's "Cells at Work!" is MAL's
+    # "Hataraku Saibou", or "Attack on Titan" is "Shingeki no Kyojin". Character
+    # similarity cannot see that link at all (0.32), so it must not be allowed to veto a
+    # top search hit; those are judged on rank, year, episode count and agreement instead.
+    mal_rank = c.get("mal_rank")
+    floor = 0.28 if mal_rank is not None else 0.50
+    if base < floor:
         return base, [f"title_sim={base:.2f} too low"], True
     s = base
     reasons.append(f"title={base:.2f}")
+    if mal_rank is not None:
+        bonus = {0: 0.34, 1: 0.26, 2: 0.20}.get(int(mal_rank), 0.10)
+        s += bonus
+        reasons.append(f"mal_search_rank={mal_rank}+{bonus:.2f}")
 
     # A very short Plex title ("Gate", "86", "CSM") substring-matches half the database:
     # "Gate" happily matched "Black Gate"/Hei Men and would have created a duplicate entry
@@ -400,6 +419,13 @@ def _dedupe(cands):
                         prev["year"] = c["year"]
                     if c.get("relations") and not prev.get("relations"):
                         prev["relations"] = c["relations"]
+                    # carry MAL's search rank across the merge: the surviving record is
+                    # often the AniList copy, which would otherwise lose the fact that
+                    # MAL itself returned this entry first for the Plex title
+                    if c.get("mal_rank") is not None and prev.get("mal_rank") is None:
+                        prev["mal_rank"] = c["mal_rank"]
+                    prev["sources"] = sorted(set([prev.get("source")] + [c.get("source")] +
+                                                 (c.get("sources") or [])))
             continue
         seen.add(key)
         out.append(c)
