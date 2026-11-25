@@ -94,6 +94,9 @@ class Cfg:
         out["mappings"] = dict(raw.get("mappings") or {})
         out["ignore"] = list(raw.get("ignore", {}).get("shows") or raw.get("ignore") or [])
         out["single_entry"] = list(raw.get("single_entry", {}).get("shows") or [])
+        # [covered] units = ["86|S1", ...]: a Plex unit whose watches are already on MAL
+        # under entries MAL splits differently, so it should be neither written nor reviewed.
+        out["covered"] = list(raw.get("covered", {}).get("units") or raw.get("covered") or [])
         out["season_totals"] = dict(raw.get("season_totals") or {})
         return out
 

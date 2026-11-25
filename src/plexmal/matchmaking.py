@@ -303,8 +303,11 @@ def score_candidate(c, queries, plex_year, season, watched, cross_ids, skip_adul
     # Meshi wo Kuu. (Zok.)" (MAL 65513) is the announced sequel with no episodes listed,
     # and it outscored the series that actually aired (59711) - 11 watched episodes would
     # have been filed against an entry that has nothing to watch.
-    if str(c.get("status") or "").upper() in ("NOT_YET_AIRD", "ANNOUNCED", "NOT_YET_AIRING",
-                                              "PRODUCTION"):
+    # AniList spells it NOT_YET_AIRD, MAL spells it NOT_YET_AIRED. Shield Hero Season 5
+    # (62564: not yet aired, no episode count) slipped through the old list and became a
+    # planned write of 25 watched episodes for what is really Plex Season 1.
+    if str(c.get("status") or "").upper() in ("NOT_YET_AIRD", "NOT_YET_AIRED", "ANNOUNCED",
+                                              "NOT_YET_AIRING", "PRODUCTION"):
         return base, [f"entry has not aired ({c.get('status')})"], True
     if (watched or 0) > 0 and c.get("episodes") == 0:
         return base, ["entry lists 0 episodes but Plex has watched episodes"], True

@@ -48,6 +48,27 @@ def _ignored(f, ov):
     return norm_title(f["plex_title"]) in want
 
 
+def _ckey(x):
+    """Normalise an override key but keep its |S<n> / |ALL suffix readable."""
+    x = str(x or "").strip()
+    if "|" in x:
+        t, suf = x.rsplit("|", 1)
+        return norm_title(t) + "|" + suf.strip().lower()
+    return norm_title(x)
+
+
+def _covered(ov, show_title, season):
+    """[covered] says: this Plex unit is already accounted for on MAL, skip it.
+
+    Needed because MAL splits what Plex keeps in one folder (86 = "86" 11 eps + "86
+    Part 2" 12 eps, both already completed). Without it the unit sits in the review
+    queue forever and hides the ones that genuinely need a decision.
+    """
+    want = {_ckey(x) for x in (ov.get("covered") or [])}
+    return _ckey(show_title) in want or _ckey(f"{show_title}|ALL") in want or \
+        _ckey(f"{show_title}|S{season}") in want
+
+
 # ------------------------------------------------------------------ scan
 
 def scan(cfg, store, log, force=False):
@@ -276,6 +297,10 @@ def build_plan(cfg, store, log, facts, mal_entries, do_resolve=True, show_noop=F
         claimed = {}          # mal_id -> the item that is writing to it this run
         for season, watched, unit_total in todo:
             mk = mkey(f["plex_title"], season)
+            if _covered(ov, f["plex_title"], season):
+                plan["skipped"].append({"plex_show": f["plex_title"],
+                                        "why": "marked [covered] in overrides: already recorded on MAL"})
+                continue
             item = {"mkey": mk, "gp_guid": f["gp_guid"], "plex_show": f["plex_title"],
                     "plex_year": f.get("year"), "season": season, "plex_watched": watched,
                     "plex_unit_total": unit_total, "structure": f.get("structure"),
@@ -390,7 +415,10 @@ def build_plan(cfg, store, log, facts, mal_entries, do_resolve=True, show_noop=F
                 ns = "completed" if full else (S.get("new_entry_status") or "watching")
             elif S.get("mark_completed_at_full", True) and cap and target >= cap \
                     and item["cur_status"] != "completed" \
-                    and item["cur_status"] not in ("dropped",):
+                    and item["cur_status"] not in ("dropped",) \
+                    and (item["cur_status"] != "on_hold" or S.get("promote_on_hold", False)):
+                # 'on_hold' stays put unless the user opts in: watching the last episode in
+                # Plex is not proof the show is considered finished. They asked for this.
                 ns = "completed"
             elif item["cur_status"] == "plan_to_watch" and target > 0 \
                     and S.get("promote_plan_to_watch", True):
