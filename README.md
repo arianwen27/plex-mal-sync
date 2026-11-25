@@ -100,7 +100,19 @@ shows = ["One Piece"]
 
 [ignore]
 shows = ["Some Show I Never Want On MAL"]
+
+[covered]
+units = ["86|ALL", "Beastars|S3"]   # already on MAL, just split differently
 ```
+
+`[covered]` is for the case where MAL splits a season into more entries than Plex has
+folders: your Plex "Season 1" of 86 is 23 episodes because it is MAL's *86* (11) plus
+*86 Part 2* (12). Neither entry can take 23 watches, so the unit would sit in the review
+queue forever and hide the ones that really need a decision. Marking it covered skips it
+with a reason in the report - per season, so a new season is still picked up later.
+
+A season-level key (`|S<n>`) is only ever consulted for a Plex unit that MAL should map
+to one entry; whole-show keys are the bare title or `|ALL`.
 
 ## Limits worth knowing
 
