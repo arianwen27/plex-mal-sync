@@ -34,6 +34,26 @@ _AL_FIELDS = ("id", "idMal", "isAdult", "format", "status", "season", "seasonYea
 
 _POOL_CACHE = {}
 
+# Short-form / promo entries that share a series' exact title but are NOT the series:
+# "Sousou no Frieren Mini Anime", "Saikyou Onmyouji no Isekai Tenseiki Mini Anime",
+# "Yani Neko Mini Anime", previews, recaps, trailers, MVs. A full 12-episode season must
+# never be filed against one of these - it writes 12 watched episodes into the wrong entry.
+VARIANT_RE = re.compile(
+    r"mini|("
+    r"preview|recap|re[\s\-]?cap|make[\s\-]?of|making[\s\-]?of|trailer|teaser|"
+    r"\bpv\b|\bcm\b|opening|ending[\s\-]?theme|insert[\s\-]?song|image[\s\-]?song|"
+    r"music[\s\-]?video|\bmv\b|pixiv|douga|short[\s\-]?story|short[\s\-]?film|"
+    r"specials?\b|\bspecials\b|commentary|footage|collab)", re.I)
+
+
+def variant_title(cand):
+    """The title that marks this candidate as a spin-off/promo entry, else None."""
+    for t in (cand.get("titles") or []):
+        t = str(t or "")
+        if VARIANT_RE.search(t):
+            return t
+    return None
+
 
 def load_cache(d):
     """Reuse previously fetched candidate pools (keeps re-runs fast and polite)."""
@@ -212,6 +232,32 @@ def score_candidate(c, queries, plex_year, season, watched, cross_ids, skip_adul
     s = base
     reasons.append(f"title={base:.2f}")
 
+    # A very short Plex title ("Gate", "86", "CSM") substring-matches half the database:
+    # "Gate" happily matched "Black Gate"/Hei Men and would have created a duplicate entry
+    # for a show that is already on the list. Such titles must match a candidate that starts
+    # with them (or equals them), not merely contains them.
+    short = [q for q in (norm_title(x) for x in queries) if 0 < len(q) <= 5]
+    if short:
+        hit = False
+        for t in (c["titles"] or []):
+            nt = norm_title(t)
+            for q in short:
+                if nt == q or nt.startswith(q + " ") or nt.startswith(q + ":") \
+                        or nt.startswith(q + "-") or nt.startswith(q + "'"):
+                    hit = True
+        if not hit:
+            return base, [f"short title '{short[0]}' is not a prefix of this entry"], True
+
+    # A very short Plex title ("Gate", "86") substring-matches half the database - that is
+    # how Plex's "Gate" got paired with MAL's unrelated "Hei Men (Black Gate)". For short
+    # titles demand that the candidate title really be the series, not merely contain the word.
+    short = [n for n in (norm_title(q) for q in queries) if 0 < len(n) <= 5]
+    if short:
+        hit = any(norm_title(t) == q or norm_title(t).startswith(q + (" ", "-", ":"))
+                  for t in c["titles"] for q in short)
+        if not hit:
+            return base, [f"short title '{short[0]}' is not a prefix of this candidate"], True
+
     # season markers are decisive when a Plex show spans several seasons
     if season and season > 1:
         if hint == season:
@@ -226,6 +272,14 @@ def score_candidate(c, queries, plex_year, season, watched, cross_ids, skip_adul
     elif season == 1 and hint and hint > 1:
         s -= 0.20
         reasons.append(f"looks_like_season_{hint}")
+
+    # mini anime / preview / recap / trailer entries are a different product. Push them
+    # well down so the real series wins; resolve_season refuses to auto-write either way.
+    vt = variant_title(c)
+    if vt:
+        pen = 0.60 if (watched or 0) > 4 else 0.30
+        s -= pen
+        reasons.append(f"variant_entry({truncate(vt, 26)})-{pen:.2f}")
 
     if c["mal_id"]:
         s += 0.06
@@ -415,6 +469,23 @@ def resolve_season(cfg, log, rl, show, season, watched, other_seasons, sibling_i
              "title": truncate(x["cand"]["titles"][0] if x["cand"]["titles"] else "", 60),
              "year": x["cand"].get("year"), "episodes": x["cand"].get("episodes")}
             for x in scored[1:5]]
+
+    # A mini anime / preview / recap entry must never outrank the real series just
+    # because its title is a verbatim copy of it. Prefer the best non-variant candidate;
+    # if nothing non-variant clears the bar, send it to review instead of writing 12
+    # watched episodes into a short-form spin-off.
+    if variant_title(top["cand"]):
+        nv = [x for x in scored if not variant_title(x["cand"])]
+        if nv and nv[0]["cand"].get("mal_id") and nv[0]["score"] >= minc - 0.10:
+            log.info(f"  skipping mini/promo entry '{truncate(variant_title(top['cand']), 34)}' "
+                     f"in favour of '{truncate(nv[0]['cand']['titles'][0], 34)}'")
+            top = nv[0]
+            second = nv[1]["score"] if len(nv) > 1 else 0.0
+        else:
+            return {"state": "needs_review", "score": top["score"], "cand": top["cand"],
+                    "alternatives": alts,
+                    "reason": f"'{truncate(variant_title(top['cand']), 40)}' is a mini/preview/promo "
+                              f"version, not the series itself - set the MAL id by hand if it is"}
 
     if not top["cand"].get("mal_id"):
         return {"state": "needs_review", "score": top["score"], "cand": top["cand"], "alternatives": alts,

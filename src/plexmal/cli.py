@@ -231,8 +231,10 @@ def write_review(cfg, store):
 
 def cmd_plan(a, cfg, store, log):
     facts = engine.scan(cfg, store, log, force=a.force_scan)
-    entries, src = engine.load_mal_entries(cfg, store, log, export=a.mal_export,
-                                           live=not a.no_resolve)
+    # --no-resolve only skips the title matchers; the live MAL list is the comparison
+    # baseline, so it must still be read here. Tying the two together made a perfectly
+    # valid login look like "not authorised".
+    entries, src = engine.load_mal_entries(cfg, store, log, export=a.mal_export, live=True)
     log.info(f"MAL list: {len(entries)} entries (from {src})")
     plan = engine.build_plan(cfg, store, log, facts, entries,
                             do_resolve=not a.no_resolve, show_noop=a.show_noop)

@@ -350,6 +350,11 @@ def build_plan(cfg, store, log, facts, mal_entries, do_resolve=True, show_noop=F
                     and item["cur_status"] != "completed" \
                     and item["cur_status"] not in ("dropped",):
                 ns = "completed"
+            elif item["cur_status"] == "plan_to_watch" and target > 0 \
+                    and S.get("promote_plan_to_watch", True):
+                # you can only have watched episodes of something you have started
+                ns = "watching"
+                item["flags"].append("was Plan to Watch -> Currently Watching (Plex has watched episodes)")
             if ns == "watching" and (item["cur_status"] or "") in ("on_hold", "dropped", "completed") \
                     and S.get("status_policy", "conservative") == "conservative":
                 ns = None
