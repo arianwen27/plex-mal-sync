@@ -116,6 +116,11 @@ to one entry; whole-show keys are the bare title or `|ALL`.
 
 ## Limits worth knowing
 
+* The scan caches each show so repeat runs are fast. The cache is only reused when the
+  show's `lastViewedAt`, its episode count *and* a fingerprint of your recorded plays
+  all match, so marking episodes unwatched or moving them into the specials season in
+  Plex is picked up automatically. `plan --force-scan` re-reads everything regardless.
+
 * Title → MAL matching is heuristic. It is good, not perfect: `overrides.toml` exists
   because ambiguous names (`86`, seasonal title variants, anime with three names) happen.
 * MAL's API has no "delete list entry" operation, so `undo` restores previous values

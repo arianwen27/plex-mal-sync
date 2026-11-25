@@ -101,6 +101,14 @@ def scan(cfg, store, log, force=False):
     hist_by_gp = {}
     for r in hist:
         hist_by_gp.setdefault(r["gp_guid"], []).append(r)
+    # A per-show fingerprint of which (season, episode) plays the history table
+    # recorded. Without it a cache hit survives someone marking a season unwatched or
+    # moving episodes into the specials season in Plex - both of which leave the show's
+    # lastViewedAt and leafCount untouched, and then we would happily plan from a stale
+    # watch state.
+    hsigs = {gp: hashlib.sha1("|".join(sorted("%s:%s" % (x.get("season"), x.get("episode"))
+                                               for x in rows)).encode("utf-8")).hexdigest()[:16]
+             for gp, rows in hist_by_gp.items()}
 
     cache = json.loads(store.get_meta("facts", "{}") or "{}")
     facts, api_seen = {}, set()
@@ -113,7 +121,8 @@ def scan(cfg, store, log, force=False):
             last = ent.get("lastViewedAt") or 0
             cached = cache.get(gp)
             reuse = (cached and not force and cached.get("last_viewed_at") == last
-                     and cached.get("api_leaf") == ent.get("leafCount"))
+                     and cached.get("api_leaf") == ent.get("leafCount")
+                     and cached.get("hist_sig") == hsigs.get(gp, ""))
             if reuse:
                 facts[gp] = cached
                 continue
@@ -134,6 +143,11 @@ def scan(cfg, store, log, force=False):
                                             "ratingKey": None, "leafCount": 0, "lastViewedAt": 0},
                                        {"key": str(rows[0]["section_id"]), "title": "?"},
                                        rows, sm, orphan=True)
+    # remember the fingerprint that made each freshly read fact valid
+    for gp in api_seen:
+        if facts.get(gp):
+            facts[gp]["hist_sig"] = hsigs.get(gp, "")
+            cache[gp] = facts[gp]
     store.set_meta("facts", json.dumps(cache))
     out = sorted(facts.values(), key=lambda f: -(f.get("last_viewed_at") or 0))
     watched = [f for f in out if f["completed_total"] > 0]
