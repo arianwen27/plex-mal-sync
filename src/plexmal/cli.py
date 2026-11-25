@@ -53,6 +53,9 @@ def main(argv=None):
     p.add_argument("--force", action="store_true", help="apply without the hash check")
     p.add_argument("--mal-export", dest="mal_export")
     p.add_argument("--max-calls", type=int, default=0, help="stop after N API writes")
+    p.add_argument("--no-resolve", action="store_true",
+                   help="build the plan exactly as `plan --no-resolve` did (no matcher calls). "
+                        "Use this with the hash you actually read.")
 
     p = sub.add_parser("undo", help="restore values from the last apply")
     p.add_argument("--yes", action="store_true", help="actually do it (default is a dry run)")
@@ -251,7 +254,7 @@ def cmd_plan(a, cfg, store, log):
 def cmd_apply(a, cfg, store, log):
     facts = engine.scan(cfg, store, log)
     entries, src = engine.load_mal_entries(cfg, store, log, export=a.mal_export)
-    plan = engine.build_plan(cfg, store, log, facts, entries, do_resolve=True)
+    plan = engine.build_plan(cfg, store, log, facts, entries, do_resolve=not a.no_resolve)
     plan["mal_source"] = src
     if plan.get("hash") != a.confirm and not a.force:
         print("The plan has changed since you read it (new episodes, or a mapping changed).")
