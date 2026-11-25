@@ -280,6 +280,16 @@ def score_candidate(c, queries, plex_year, season, watched, cross_ids, skip_adul
         s -= 0.20
         reasons.append(f"looks_like_season_{hint}")
 
+    # You cannot have watched episodes of something that has not aired. "Shibou Yuugi de
+    # Meshi wo Kuu. (Zok.)" (MAL 65513) is the announced sequel with no episodes listed,
+    # and it outscored the series that actually aired (59711) - 11 watched episodes would
+    # have been filed against an entry that has nothing to watch.
+    if str(c.get("status") or "").upper() in ("NOT_YET_AIRD", "ANNOUNCED", "NOT_YET_AIRING",
+                                              "PRODUCTION"):
+        return base, [f"entry has not aired ({c.get('status')})"], True
+    if (watched or 0) > 0 and c.get("episodes") == 0:
+        return base, ["entry lists 0 episodes but Plex has watched episodes"], True
+
     # mini anime / preview / recap / trailer entries are a different product. Push them
     # well down so the real series wins; resolve_season refuses to auto-write either way.
     vt = variant_title(c)

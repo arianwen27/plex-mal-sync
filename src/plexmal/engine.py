@@ -25,7 +25,13 @@ def mkey(title, season=None):
 
 def override_lookup(ov_map, show_title, season):
     cands = [show_title, norm_title(show_title)]
-    if season is not None:
+    if season is None:
+        # "|ALL" was documented for shows MAL keeps in a single entry, but was never
+        # actually tried for season-less units, so such an override was ignored. It is
+        # deliberately NOT tried for a numbered season: that would collapse every season
+        # of a multi-season show onto the same entry.
+        cands += [f"{show_title}|ALL", f"{norm_title(show_title)}|ALL"]
+    else:
         cands += [f"{show_title}|S{season}", f"{norm_title(show_title)}|S{season}"]
     for c in cands:
         for k, v in (ov_map or {}).items():
@@ -220,6 +226,29 @@ def build_plan(cfg, store, log, facts, mal_entries, do_resolve=True, show_noop=F
     ov = cfg.overrides()
     rl = Ratelimit(S.get("resolve_gap_seconds", 1.0))
     matchmaking.load_cache(json.loads(store.get_meta("rescache", "{}") or "{}"))
+    mal_client = [None]
+
+    def canonical(mid):
+        """MAL's own record of an entry. Used for the episode count, which decides both
+        'completed vs watching' and the season-grouping cap, so it must not come from a
+        title matcher. Cached in the local store to keep API calls down."""
+        info = store.mal_cache(mid)
+        if info and info.get("num_episodes"):
+            return info
+        if mal_client[0] is None:
+            probe = malapi.MAL(cfg, log)
+            mal_client[0] = probe if probe.ready() else False
+        if mal_client[0] is False:
+            return None
+        try:
+            j = mal_client[0].anime(mid) or {}
+        except Exception as e:
+            log.warn(f"MAL lookup for {mid} failed: {e}")
+            return None
+        if j:
+            store.cache_mal(mid, j.get("title"), j.get("num_episodes"), j.get("status"),
+                            None, None, bool(j.get("nsfw")), json.dumps(j)[:400])
+        return j or None
     plan = {"created": now(), "items": [], "review": [], "blocked": [], "noop": [],
             "skipped": [], "mal_source": None, "stats": {}}
 
@@ -244,6 +273,7 @@ def build_plan(cfg, store, log, facts, mal_entries, do_resolve=True, show_noop=F
             todo = [(u["season"], u["completed"], u["total"]) for u in units]
 
         used_ids = set()
+        claimed = {}          # mal_id -> the item that is writing to it this run
         for season, watched, unit_total in todo:
             mk = mkey(f["plex_title"], season)
             item = {"mkey": mk, "gp_guid": f["gp_guid"], "plex_show": f["plex_title"],
@@ -323,6 +353,15 @@ def build_plan(cfg, store, log, facts, mal_entries, do_resolve=True, show_noop=F
                     item["mal_title"] = item["mal_title"] or info.get("title")
                     item["total_episodes"] = info.get("num_episodes")
 
+            if not item["total_episodes"]:
+                # new entries have no cap yet; without one a finished series would be
+                # filed as "watching" and the grouping check could not run
+                c = canonical(item["mal_id"])
+                if c:
+                    item["mal_title"] = item["mal_title"] or c.get("title")
+                    item["total_episodes"] = c.get("num_episodes") or None
+                    item["mal_adult"] = bool(c.get("nsfw"))
+
             target = watched
             cap = item["total_episodes"] or 0
             if cap and target > cap:
@@ -375,6 +414,24 @@ def build_plan(cfg, store, log, facts, mal_entries, do_resolve=True, show_noop=F
                 item["flags"].append(f"single jump of {target - cur} episodes exceeds max_episode_bump")
                 plan["blocked"].append(item)
                 continue
+            # One MAL entry must not be written to by two Plex seasons in the same run.
+            # Both Danganronpa seasons resolved to 16592 (13 eps and 7 eps); the second
+            # write would be silently dropped by never-decrease, hiding a bad match.
+            other = claimed.get(item["mal_id"])
+            if other is not None:
+                keep, lose = (item, other) if (item["new_watched"] or 0) > \
+                    (other["new_watched"] or 0) else (other, item)
+                lose["flags"].append(
+                    "another Plex unit (%s %s) already resolves to MAL %s for %d episodes; "
+                    "only one write per entry per run - which entry is %s really?"
+                    % (keep.get("plex_show"), keep.get("season"), item["mal_id"],
+                       keep["new_watched"] or 0, item["mal_id"]))
+                if lose is item:
+                    plan["review"].append(item)
+                    continue
+                plan["items"].remove(other)
+                plan["review"].append(other)
+            claimed[item["mal_id"]] = keep if other is not None else item
             plan["items"].append(item)
 
     # ---- per-run caps (writes are ordered safest first)
