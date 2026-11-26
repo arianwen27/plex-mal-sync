@@ -185,7 +185,9 @@ def format_findings(findings):
 def write_summary(log, findings, d=None, expect_ids=()):
     """Log an audit result. Returns True when it is safe to proceed."""
     for line in format_findings(findings):
-        (log.error if line.endswith("do not write this") else log.info)(line)
+        # blockers must be LOUD: a header that ends up in the info stream is a blocker
+        # somebody reads past on a long apply
+        (log.error if line.startswith("BLOCKERS") else log.info)(line)
     if not findings:
         log.info("audit: clean - every write matches MAL's own record of the entry")
     if d is not None:

@@ -203,6 +203,15 @@ def test_audit():
     else:
         check(True, "audit asks MAL for the extra fields")
 
+    # a blocker has to be LOUD in the log, or it scrolls past on a long apply
+    cap = _Capture()
+    safe = audit.write_summary(cap, [("block", 123, "nope")])
+    check(safe is False and any("BLOCKERS" in x for x in cap.err),
+          "a blocker is logged as an error, not as information")
+    cap2 = _Capture()
+    check(audit.write_summary(cap2, [("warn", 123, "hmm")]) is True
+          and not cap2.err, "a warning alone still allows the write")
+
 
 def test_diff():
     print("\nC. audit: the after-the-fact proof that nothing else moved\n")
