@@ -14,7 +14,7 @@ import hashlib
 import json
 import time
 
-from . import malapi, matchmaking
+from . import audit, malapi, matchmaking
 from .sources import Plex, PlexError
 from .util import Ratelimit, norm_title, now, truncate, ts, tsn
 
@@ -521,7 +521,8 @@ def plan_hash(plan):
 
 # ------------------------------------------------------------- apply
 
-def apply_plan(cfg, store, log, plan, confirm=None, force=False, mal=None, max_calls=None):
+def apply_plan(cfg, store, log, plan, confirm=None, force=False, mal=None, max_calls=None,
+                 skip_audit=False):
     if not force and (confirm or "") != plan.get("hash"):
         raise SystemExit(f"plan hash mismatch - re-read the report and pass --confirm {plan.get('hash')}")
     items = [i for i in plan.get("items", []) if i.get("action") in ("new_entry", "bump", "status_only")]
@@ -535,6 +536,18 @@ def apply_plan(cfg, store, log, plan, confirm=None, force=False, mal=None, max_c
     log.info(f"backing up your live MAL list before writing {len(items)} change(s)")
     bpath, live = mal.backup(f"pre-apply {plan.get('hash')}")
     live_by_id = {k: v for k, v in (live or {}).items()}
+
+    # ---- audit the plan against MAL's own records BEFORE anything is written. The plan
+    # was built from matcher titles; this re-reads every target entry from MAL and checks
+    # the counts, the airing status and the title independently.
+    if skip_audit:
+        log.warn("AUDIT SKIPPED - the writes below have not been checked against MAL's records")
+    else:
+        findings = audit.check_writes(cfg, mal, log, items, live=live_by_id)
+        if not audit.write_summary(log, findings):
+            raise SystemExit("apply refused: the plan does not survive the audit against "
+                             "MyAnimeList's own data (blockers listed above). Nothing was "
+                             "written. Backup of your list: " + str(bpath))
 
     run_id = time.strftime("%Y%m%d_%H%M%S") + "_" + (plan.get("hash") or "x")
     written = failed = skipped = 0
@@ -601,6 +614,11 @@ def apply_plan(cfg, store, log, plan, confirm=None, force=False, mal=None, max_c
         else:
             log.info(f"verify ok: re-read {len(back or {})} entries, all {len(expect)} write(s) "
                      f"landed exactly as planned")
+        # what actually moved on the list, compared with the snapshot taken before writing:
+        # anything outside our own write set is a bug or someone else editing the list.
+        if back is not None and not skip_audit:
+            audit.write_summary(log, [], audit.diff(live_by_id, back),
+                                expect_ids={e[0] for e in expect})
     log.info(f"apply done: {written} written, {failed} failed, {skipped} skipped. "
              f"backup: {bpath}")
     store.set_meta("last_apply_run", run_id)

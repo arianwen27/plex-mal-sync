@@ -329,8 +329,16 @@ class MAL:
         st, j, _ = last
         return False, st, j
 
-    def anime(self, mal_id):
-        st, j, _ = self._req("GET", f"/anime/{mal_id}", params={"fields": "id,title,num_episodes,status,media_type"})
+    # The anime endpoint returns a stub unless you ask for fields - without
+    # alternative_titles there is no English title, no synonyms and no nsfw flag, and an
+    # audit that cannot see those is checking far less than it looks like it is.
+    ANIME_FIELDS = "id,title,num_episodes,status,media_type"
+    AUDIT_FIELDS = ("id,title,alternative_titles,synonyms,nsfw,num_episodes,status,"
+                    "media_type,start_season")
+
+    def anime(self, mal_id, fields=None):
+        st, j, _ = self._req("GET", f"/anime/{mal_id}",
+                             params={"fields": fields or self.ANIME_FIELDS})
         if st != 200:
             return None
         return j

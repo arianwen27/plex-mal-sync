@@ -299,6 +299,17 @@ def score_candidate(c, queries, plex_year, season, watched, cross_ids, skip_adul
         s -= 0.20
         reasons.append(f"looks_like_season_{hint}")
 
+    # A Plex unit must never be filed against an entry that names a LATER season than
+    # that unit is: Shield Hero's "Season 1" folder is not *Season 5* (which has not even
+    # aired), and Danmachi S1 is not *Danmachi V*. Penalties alone were not enough - both
+    # of those outscored the correct entry, and both would have created a wrong entry on
+    # the list. The other direction (entry names an EARLIER season) stays a soft penalty,
+    # because Plex/TMDB season numbering genuinely drifts: that belongs in front of a
+    # human in the review queue, not silently written.
+    if season and hint is not None and hint > season:
+        return base, reasons + [f"season_conflict: entry names season {hint}, "
+                                f"this Plex unit is S{season}"], True
+
     # You cannot have watched episodes of something that has not aired. "Shibou Yuugi de
     # Meshi wo Kuu. (Zok.)" (MAL 65513) is the announced sequel with no episodes listed,
     # and it outscored the series that actually aired (59711) - 11 watched episodes would

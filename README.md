@@ -32,6 +32,11 @@ Plex (read-only)            matching                        MyAnimeList
   re-scoring or touching entries Plex has never heard of is refused by the code, not by config.
 * **Uncertain matches are never guessed at.** If the title resolver is not clearly right,
   the show lands in a `NEEDS REVIEW` section of the report and nothing is written for it.
+* **A season cannot be filed against the wrong sequel.** A MAL entry whose name points at a
+  *later* season than the Plex unit it would receive is refused outright — that is what
+  nearly sent Shield Hero Season 1's 25 watches to *Season 5*, which has not aired.
+* **Every write is checked from MAL's side before it happens, and audited after.** See
+  [The audit](#the-audit).
 * **Backups and undo.** Your whole live MAL list is snapshotted before any write, and every
   write is logged with its previous value so it can be reverted.
 
@@ -53,6 +58,7 @@ python plex_mal.py scan                   # journal Plex watch history into data
 python plex_mal.py resolve                # title -> MAL id mapping
 python plex_mal.py plan                   # WHAT WOULD BE WRITTEN (writes nothing)
 python plex_mal.py apply --confirm <hash> # the only command that writes
+python plex_mal.py audit --backup auto    # afterwards: prove exactly what moved
 ```
 
 ### `config.toml` essentials
@@ -82,6 +88,61 @@ python plex_mal.py apply --confirm <hash> # the only command that writes
 
 `apply` also requires the plan's hash, which changes if the plan content changes — so a
 report you have actually read is the thing being approved.
+
+## The audit
+
+`plan` reasons from titles and episode counts. `audit` ignores all of that and asks
+MyAnimeList instead: what is this entry *really* called, how many episodes does it have,
+has it aired, is it adult — and after a write, what does your list actually contain now.
+
+```bash
+python plex_mal.py audit                    # newest saved plan. writes nothing
+python plex_mal.py audit --plan reports/plan_xxx.json
+python plex_mal.py audit --backup auto      # afterwards: pre-apply backup vs live list
+```
+
+It prints **blockers** (apply must not run) and **warnings** (worth a glance):
+
+| Blocker | Why it exists |
+|---|---|
+| entry has fewer episodes than the write | 51535 *Kanketsu-hen* has 2 episodes; the 30-episode Plex "specials" unit that contains them is recorded elsewhere |
+| entry has not aired yet | 62564 *Shield Hero Season 5* (`not_yet_aired`, no episode count) was the matcher's pick for Season 1's 25 watches |
+| entry looks like a mini / preview / recap | 56885 is a Frieren *Mini Anime*; the romaji title hides it — only MAL's English synonym gives it away |
+| one MAL entry claimed by two Plex units | Danganronpa and Assassination Classroom both wanted the same entry. One write per entry is the only thing provable afterwards |
+| the write would lower a watched count | belt and braces on top of `never_decrease` |
+| MAL would not return the entry at all | a stale or invented id cannot be checked, so it is not written |
+| adult entry while `skip_adult` is on | |
+
+| Warning | Meaning |
+|---|---|
+| no episode count on MAL | still airing — the write cannot be capped |
+| small-media type receiving many episodes | an ONA/OVA taking 10+ watches: right show, wrong entry? |
+| already accurate | the write changes nothing |
+| Plex unit and MAL entry disagree on episode count | season grouping differs; read it before approving |
+| MAL's own search does not return the entry | the match came from AniList/Shikimori only |
+
+`apply` runs the same check **after** the backup and **before** the first write, and refuses
+to write a single field if anything is blocked. Afterwards it re-reads the list and proves
+that nothing outside the plan moved:
+
+```
+audit: list 199 -> 208 entries, +9 new, 2 changed, 0 removed, 197 untouched
+audit: nothing outside the planned writes moved
+```
+
+`apply --skip-audit` exists for when MAL is unreachable. It skips precisely the check that
+stops a write aimed at the wrong entry, so use it knowingly.
+
+### Checking the code itself
+
+```bash
+python plex_mal.py selftest           # offline: no Plex, no MAL, no writes
+python plex_mal.py selftest --online  # then the same rules against the real API
+```
+
+The fixtures are copies of the entries this project actually aimed a write at by mistake, so
+if a rule is loosened later the suite fails loudly instead of quietly wrecking a list. Run
+it after touching `matchmaking.py`, `audit.py`, `engine.py` or `config.py`.
 
 ## Multi-season shows
 
@@ -113,6 +174,10 @@ with a reason in the report - per season, so a new season is still picked up lat
 
 A season-level key (`|S<n>`) is only ever consulted for a Plex unit that MAL should map
 to one entry; whole-show keys are the bare title or `|ALL`.
+
+If your library genuinely numbers a show's second season as `S1` (some people keep each
+cour in its own folder), the later-season rule will refuse every candidate and the unit
+lands in the review queue — pin it with a `[mappings]` entry instead of loosening the rule.
 
 ## Limits worth knowing
 

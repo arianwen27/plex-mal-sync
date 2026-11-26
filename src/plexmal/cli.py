@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 
-from . import engine, malapi, reporting
+from . import audit, engine, malapi, reporting, selftest
 from .config import Cfg
 from .sources import Plex, PlexError
 from .store import Store
@@ -56,6 +56,15 @@ def main(argv=None):
     p.add_argument("--no-resolve", action="store_true",
                    help="build the plan exactly as `plan --no-resolve` did (no matcher calls). "
                         "Use this with the hash you actually read.")
+    p.add_argument("--skip-audit", action="store_true",
+                   help="do NOT re-check every write against MAL's own record first. Avoid: "
+                        "this is what stops a write aimed at the wrong entry.")
+
+    p = sub.add_parser("audit", help="re-check a saved plan (and an apply afterwards) against "
+                                     "MAL's own records. Writes nothing.")
+    p.add_argument("--plan", default="", help="plan JSON (default: the newest saved plan)")
+    p.add_argument("--backup", default="", metavar="PATH",
+                   help="also diff a pre-apply backup ('auto' = newest) against the live list")
 
     p = sub.add_parser("undo", help="restore values from the last apply")
     p.add_argument("--yes", action="store_true", help="actually do it (default is a dry run)")
@@ -74,6 +83,11 @@ def main(argv=None):
     p.add_argument("--apply", action="store_true", help="apply each plan automatically (caps still enforced)")
     p.add_argument("--once", action="store_true")
 
+    p = sub.add_parser("selftest", help="check the safety rails (season guard, audit refusals). "
+                                      "Writes nothing, needs no Plex or MAL login.")
+    p.add_argument("--online", action="store_true",
+                   help="also re-check the audit rules against the real MAL API (read-only)")
+
     sub.add_parser("reports", help="list saved reports")
 
     a = ap.parse_args(argv)
@@ -83,7 +97,8 @@ def main(argv=None):
 
     try:
         return {"status": cmd_status, "sections": cmd_sections, "scan": cmd_scan,
-                "resolve": cmd_resolve, "plan": cmd_plan, "apply": cmd_apply, "undo": cmd_undo,
+                "resolve": cmd_resolve, "plan": cmd_plan, "apply": cmd_apply, "audit": cmd_audit,
+                "undo": cmd_undo, "selftest": cmd_selftest,
                 "login": cmd_login, "watch": cmd_watch, "reports": cmd_reports}[a.cmd](a, cfg, store, log)
     except PlexError as e:
         log.error(str(e))
@@ -264,9 +279,90 @@ def cmd_apply(a, cfg, store, log):
         return 3
     md, js = reporting.write_reports(cfg, plan)
     res = engine.apply_plan(cfg, store, log, plan, confirm=a.confirm or plan.get("hash"),
-                            force=a.force, max_calls=a.max_calls or None)
+                            force=a.force, max_calls=a.max_calls or None,
+                            skip_audit=a.skip_audit)
     print(json.dumps(res, indent=2))
     return 0 if not res.get("failed") else 1
+
+
+def cmd_audit(a, cfg, store, log):
+    """Re-check a saved plan against what MyAnimeList itself says about each entry.
+
+    Read-only. Run it before `apply` if you want the plan's targets proven from MAL's
+    side, and with --backup auto afterwards to see exactly what moved.
+    """
+    import glob
+    path = a.plan or ""
+    if not path:
+        cands = sorted(glob.glob(os.path.join(cfg.reports_dir, "plan_*.json")))
+        if not cands:
+            print("no saved plan found - run  python plex_mal.py plan  first")
+            return 2
+        path = cands[-1]
+    try:
+        plan = json.load(open(path, encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print("cannot read %s: %s" % (path, e))
+        return 2
+    items = [i for i in plan.get("items") or []
+             if i.get("action") in ("new_entry", "bump", "status_only")]
+    m = malapi.MAL(cfg, log)
+    if not m.ready():
+        print("not authorised with MyAnimeList - run:  python plex_mal.py login")
+        return 2
+    live = m.my_list()
+    print("plan    :", os.path.basename(path), "| hash", plan.get("hash"),
+          "|", len(items), "write(s)")
+    print("MAL list:", len(live), "entries")
+    findings = audit.check_writes(cfg, m, log, items, live=live)
+    lines = audit.format_findings(findings)
+    print("\n".join(lines) if lines else
+          "\nclean: every write matches MAL's own record of that entry")
+    blocked = any(f[0] == "block" for f in findings)
+
+    bpath = a.backup or ""
+    if bpath == "auto":
+        cands = sorted(glob.glob(os.path.join(cfg.backups_dir, "mal_list_*.json")))
+        if not cands:
+            print("no backups found in", cfg.backups_dir)
+            bpath = ""
+        else:
+            bpath = cands[-1]
+    if bpath:
+        try:
+            snap = json.load(open(bpath, encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            print("cannot read backup %s: %s" % (bpath, e))
+            return 2
+        rows = snap.get("list") if isinstance(snap, dict) else snap
+        before = {}
+        for e in (rows.values() if isinstance(rows, dict) else rows or []):
+            mid = e.get("mal_id") or e.get("id")
+            if mid is not None and str(mid).isdigit():
+                before[int(mid)] = e
+        d = audit.diff(before, live)
+        print("\nbackup  :", os.path.basename(bpath),
+              "| taken", ts(snap.get("backup_at")) if isinstance(snap, dict) else "",
+              "|", len(before), "entries")
+        print("moved   : %d -> %d entries | +%d new, %d changed, %d removed, %d untouched" % (
+              d["before"], d["after"], len(d["added"]), len(d["changed"]),
+              len(d["removed"]), d["untouched"]))
+        for mid in d["added"][:40]:
+            print("   NEW     %-8s %-45s %s/%s" % (mid, str(live[mid].get("title"))[:45],
+                                                  live[mid].get("watched"),
+                                                  live[mid].get("status")))
+        for mid in d["changed"][:40]:
+            print("   CHANGED %-8s %-45s %s/%s -> %s/%s" % (
+                mid, str(live[mid].get("title"))[:45], before[mid].get("watched"),
+                before[mid].get("status"), live[mid].get("watched"),
+                live[mid].get("status")))
+        for mid in d["removed"][:40]:
+            print("   REMOVED %-8s %-45s was %s/%s" % (
+                mid, str(before[mid].get("title"))[:45], before[mid].get("watched"),
+                before[mid].get("status")))
+        if d["removed"]:
+            print("\nWARNING: entries left your list that we never asked to remove.")
+    return 1 if blocked else 0
 
 
 def cmd_undo(a, cfg, store, log):
@@ -330,6 +426,13 @@ def cmd_watch(a, cfg, store, log):
         if a.once:
             return 0
         time.sleep(max(60, a.interval * 60))
+
+
+def cmd_selftest(a, cfg, store, log):
+    fails = selftest.run(cfg, log, online=a.online)
+    if fails:
+        log.error(f"selftest: {fails} check(s) failed - do not apply anything until this is fixed")
+    return 1 if fails else 0
 
 
 def cmd_reports(a, cfg, store, log):
