@@ -91,9 +91,11 @@ class FakeMAL:
 CFG = types.SimpleNamespace(sync={"skip_adult": True})
 
 FAILURES = []
+CHECKS = []
 
 
 def check(ok, label, detail=""):
+    CHECKS.append(label)
     print("  %-4s %s%s" % ("PASS" if ok else "FAIL", label, ("  " + detail) if detail else ""))
     if not ok:
         FAILURES.append(label)

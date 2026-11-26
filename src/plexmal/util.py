@@ -48,7 +48,9 @@ class Log:
     def _emit(self, level, msg):
         line = f"[{datetime.now().strftime('%H:%M:%S')}] {level:5s} {msg}"
         if not self.quiet:
-            print(line, flush=True)
+            # diagnostics go to STDERR, deliberately: the report a caller parses lives on
+            # stdout, and a progress line in the middle of it makes the output unparseable
+            print(line, file=sys.stderr, flush=True)
         if self.path:
             with open(self.path, "a", encoding="utf-8") as fh:
                 fh.write(datetime.now().isoformat(timespec="seconds") + f" {level:5s} {msg}\n")
@@ -58,7 +60,7 @@ class Log:
     def error(self, m): self._emit("ERROR", m)
     def debug(self, m):
         if not self.quiet:
-            print(f"[debug] {m}", flush=True)
+            print(f"[debug] {m}", file=sys.stderr, flush=True)
 
 
 def read_json(path, default=None):

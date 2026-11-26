@@ -32,8 +32,12 @@ def main(argv=None):
     ap.add_argument("-q", "--quiet", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("status", help="what is configured and reachable")
-    sub.add_parser("sections", help="list Plex libraries and accounts")
+    p = sub.add_parser("status", help="what is configured and reachable")
+    p.add_argument("--json", action="store_true",
+                   help="one JSON object on stdout (no secrets in it); diagnostics on stderr")
+
+    p = sub.add_parser("sections", help="list Plex libraries and accounts")
+    p.add_argument("--json", action="store_true", help="one JSON object on stdout")
     p = sub.add_parser("scan", help="journal Plex watch history into the local cache")
     p.add_argument("--force", action="store_true", help="re-read every show, ignoring the cache")
 
@@ -47,6 +51,9 @@ def main(argv=None):
     p.add_argument("--no-resolve", action="store_true", help="do not call title matchers (use cached mappings only)")
     p.add_argument("--show-noop", action="store_true", help="also list entries already in sync")
     p.add_argument("--force-scan", action="store_true")
+    p.add_argument("--json", action="store_true",
+                   help="the plan itself as one JSON object on stdout (the same object that is "
+                        "saved to data/reports/); the human table is not printed")
 
     p = sub.add_parser("apply", help="write a plan you have read (requires its hash)")
     p.add_argument("--confirm", default="", help="the plan hash from the report")
@@ -65,6 +72,9 @@ def main(argv=None):
     p.add_argument("--plan", default="", help="plan JSON (default: the newest saved plan)")
     p.add_argument("--backup", default="", metavar="PATH",
                    help="also diff a pre-apply backup ('auto' = newest) against the live list")
+    p.add_argument("--json", action="store_true",
+                   help="findings and the list diff as one JSON object on stdout. Exit code is "
+                        "still 1 when something is blocked.")
 
     p = sub.add_parser("undo", help="restore values from the last apply")
     p.add_argument("--yes", action="store_true", help="actually do it (default is a dry run)")
@@ -87,6 +97,9 @@ def main(argv=None):
                                       "Writes nothing, needs no Plex or MAL login.")
     p.add_argument("--online", action="store_true",
                    help="also re-check the audit rules against the real MAL API (read-only)")
+    p.add_argument("--json", action="store_true",
+                   help="one JSON object on stdout: {ok, checks, failures[]}. The pass/fail "
+                        "listing goes to stderr.")
 
     sub.add_parser("reports", help="list saved reports")
 
@@ -110,7 +123,65 @@ def main(argv=None):
 
 # ------------------------------------------------------------------ commands
 
+def _jout(payload):
+    """One JSON object on stdout. Diagnostics live on stderr (see util.Log)."""
+    json.dump(payload, sys.stdout, ensure_ascii=False, indent=2, default=str)
+    sys.stdout.write("\n")
+
+
+def _want_json(a):
+    return bool(getattr(a, "json", False))
+
+
+def _err(a, msg, code=2):
+    """A --json caller must get a parseable stdout, so the reason goes to stderr and an
+    ok:false object to stdout. Non-zero exit either way - that is the real signal."""
+    print(msg, file=sys.stderr if _want_json(a) else sys.stdout)
+    if _want_json(a):
+        _jout({"ok": False, "command": a.cmd, "error": msg})
+    return code
+
+
+SAFETY_KEYS = ("never_decrease", "min_confidence", "max_new_entries_per_run",
+               "max_episode_bump", "max_writes_per_run", "status_policy", "skip_adult")
+
+
+def _status_data(cfg, store):
+    """Health of the whole setup. Carries no secret VALUES, only set/unset + expiry."""
+    tok = Plex(cfg, Log(None, quiet=True)).token
+    m = cfg.mal
+    toks = {}
+    if os.path.exists(cfg.tokens):
+        try:
+            toks = json.load(open(cfg.tokens, encoding="utf-8"))
+        except (OSError, ValueError):
+            toks = {"unreadable": True}
+    return {
+        "ok": True, "command": "status", "config_path": cfg.path,
+        "plex": {"db_path": cfg.plex.get("db_path"),
+                 "db_exists": os.path.exists(cfg.plex.get("db_path") or ""),
+                 "url": cfg.plex.get("url"), "libraries": cfg.plex.get("libraries") or [],
+                 "accounts": cfg.plex.get("accounts") or [],
+                 "api_token_found": bool(tok),
+                 "token_source": "config.toml" if cfg.plex.get("token") else "auto-detected"},
+        "mal": {"client_id_set": bool(m.get("client_id")),
+                "client_secret_set": bool(m.get("client_secret")),
+                "token_saved": bool(toks), "authorised": bool(toks.get("access_token")),
+                "expires_at": toks.get("expires_at"),
+                "expires_human": ts(toks.get("expires_at")) if toks.get("expires_at") else None},
+        "export_path": m.get("export_path") or None,
+        "cache": {"path": cfg.cache_db, "episode_rows": store.episode_count(),
+                  "last_apply_run": store.get_meta("last_apply_run") or None},
+        "safety": {k: cfg.sync.get(k) for k in SAFETY_KEYS},
+        "paths": {"data": cfg.data_dir, "reports": cfg.reports_dir, "backups": cfg.backups_dir,
+                  "logs": cfg.logs_dir, "overrides": cfg.overrides_path, "tokens": cfg.tokens},
+    }
+
+
 def cmd_status(a, cfg, store, log):
+    if _want_json(a):
+        _jout(_status_data(cfg, store))
+        return 0
     print("config:", cfg.path)
     print("  plex db :", cfg.plex.get("db_path"), "exists" if os.path.exists(cfg.plex.get("db_path") or "") else "MISSING")
     print("  plex url:", cfg.plex.get("url"), "| libraries:", cfg.plex.get("libraries"),
@@ -136,19 +207,26 @@ def cmd_status(a, cfg, store, log):
 
 def cmd_sections(a, cfg, store, log):
     px = Plex(cfg, log)
-    for s in px.sections():
-        print(f"  #{s['key']:<4} {s['type']:<6} {s['title']}")
+    secs = px.sections()
     from .sources import connect_db
     con, cleanup = connect_db(cfg, log)
     try:
         names = sorted((r["name"] for r in con.execute("SELECT name FROM accounts WHERE name<>''")), key=str.lower)
-        print(f"\n  {len(names)} Plex accounts. Yours must be listed in [plex] accounts:")
-        print("  " + ", ".join(names[:40]))
     finally:
         con.close()
         if cleanup:
             import shutil
             shutil.rmtree(cleanup, ignore_errors=True)
+    if _want_json(a):
+        _jout({"ok": True, "command": "sections", "sections": secs, "account_count": len(names),
+               "accounts": names,
+               "note": "list the user's own Plex username(s) in [plex] accounts; everyone else "
+                       "on the server is ignored"})
+        return 0
+    for s in secs:
+        print(f"  #{s['key']:<4} {s['type']:<6} {s['title']}")
+    print(f"\n  {len(names)} Plex accounts. Yours must be listed in [plex] accounts:")
+    print("  " + ", ".join(names[:40]))
     return 0
 
 
@@ -258,6 +336,15 @@ def cmd_plan(a, cfg, store, log):
                             do_resolve=not a.no_resolve, show_noop=a.show_noop)
     plan["mal_source"] = src
     md, js = reporting.write_reports(cfg, plan)
+    if _want_json(a):
+        # the same object that goes to data/reports/*.json, so either source is authoritative
+        d = {k: v for k, v in plan.items() if k != "noop" or a.show_noop}
+        d.update({"ok": True, "command": "plan", "report_md": md, "report_json": js,
+                  "mal_entries": len(entries), "plex_show_facts": len(facts),
+                  "next": (f"apply --confirm {plan['hash']}" if plan["items"]
+                           else "nothing to write")})
+        _jout(d)
+        return 0
     print(reporting.console(plan))
     print("\nreport:", md)
     print("json  :", js)
@@ -271,17 +358,37 @@ def cmd_apply(a, cfg, store, log):
     entries, src = engine.load_mal_entries(cfg, store, log, export=a.mal_export)
     plan = engine.build_plan(cfg, store, log, facts, entries, do_resolve=not a.no_resolve)
     plan["mal_source"] = src
-    if plan.get("hash") != a.confirm and not a.force:
-        print("The plan has changed since you read it (new episodes, or a mapping changed).")
-        print(f"New hash: {plan.get('hash')}  with {plan['stats']['writes']} writes")
-        print(reporting.console(plan))
-        print(f"\nRe-read it, then:  python plex_mal.py apply --confirm {plan.get('hash')}")
-        return 3
     md, js = reporting.write_reports(cfg, plan)
-    res = engine.apply_plan(cfg, store, log, plan, confirm=a.confirm or plan.get("hash"),
-                            force=a.force, max_calls=a.max_calls or None,
-                            skip_audit=a.skip_audit)
-    print(json.dumps(res, indent=2))
+    if plan.get("hash") != a.confirm and not a.force:
+        # the plan moved under the caller (new plays, or a mapping changed). The human table
+        # goes to stderr; stdout still gets one JSON object so a caller never has to parse a
+        # table to find out that nothing was written.
+        print("The plan has changed since you read it (new episodes, or a mapping changed).",
+              file=sys.stderr)
+        print(f"New hash: {plan.get('hash')}  with {plan['stats']['writes']} writes", file=sys.stderr)
+        print(reporting.console(plan), file=sys.stderr)
+        print(f"\nRe-read it, then:  python plex_mal.py apply --confirm {plan.get('hash')}",
+              file=sys.stderr)
+        _jout({"ok": False, "command": "apply", "written": 0, "error": "hash_mismatch",
+               "reason": "the plan changed after it was read; nothing was written",
+               "asked_for": a.confirm, "new_hash": plan.get("hash"), "stats": plan["stats"],
+               "plan_json": js, "report_md": md,
+               "next": f"plan --no-resolve --json  (then apply --confirm {plan.get('hash')})"})
+        return 3
+    try:
+        res = engine.apply_plan(cfg, store, log, plan, confirm=a.confirm or plan.get("hash"),
+                                force=a.force, max_calls=a.max_calls or None,
+                                skip_audit=a.skip_audit)
+    except SystemExit as e:
+        # apply_plan refuses: audit blockers, no token, or a hash mismatch it caught itself.
+        # Nothing was written; say so in the same shape a caller can always expect.
+        _jout({"ok": False, "command": "apply", "written": 0, "error": "refused",
+               "reason": str(e), "plan_hash": plan.get("hash"), "stats": plan["stats"]})
+        return 1
+    res = dict(res)
+    res.update({"ok": not res.get("failed"), "command": "apply", "plan_hash": plan.get("hash"),
+                "report_md": md, "report_json": js})
+    _jout(res)
     return 0 if not res.get("failed") else 1
 
 
@@ -296,35 +403,31 @@ def cmd_audit(a, cfg, store, log):
     if not path:
         cands = sorted(glob.glob(os.path.join(cfg.reports_dir, "plan_*.json")))
         if not cands:
-            print("no saved plan found - run  python plex_mal.py plan  first")
-            return 2
+            return _err(a, "no saved plan found - run  python plex_mal.py plan  first")
         path = cands[-1]
     try:
         plan = json.load(open(path, encoding="utf-8"))
     except (OSError, ValueError) as e:
-        print("cannot read %s: %s" % (path, e))
-        return 2
+        return _err(a, "cannot read %s: %s" % (path, e))
     items = [i for i in plan.get("items") or []
              if i.get("action") in ("new_entry", "bump", "status_only")]
     m = malapi.MAL(cfg, log)
     if not m.ready():
-        print("not authorised with MyAnimeList - run:  python plex_mal.py login")
-        return 2
+        return _err(a, "not authorised with MyAnimeList - run:  python plex_mal.py login")
     live = m.my_list()
-    print("plan    :", os.path.basename(path), "| hash", plan.get("hash"),
-          "|", len(items), "write(s)")
-    print("MAL list:", len(live), "entries")
     findings = audit.check_writes(cfg, m, log, items, live=live)
-    lines = audit.format_findings(findings)
-    print("\n".join(lines) if lines else
-          "\nclean: every write matches MAL's own record of that entry")
     blocked = any(f[0] == "block" for f in findings)
+    payload = {"ok": True, "command": "audit", "plan_file": path, "plan_hash": plan.get("hash"),
+               "writes": len(items), "live_entries": len(live), "blocked": blocked,
+               "findings": [{"severity": s, "mal_id": i, "message": g} for s, i, g in findings],
+               "backup": None, "diff": None}
 
     bpath = a.backup or ""
     if bpath == "auto":
         cands = sorted(glob.glob(os.path.join(cfg.backups_dir, "mal_list_*.json")))
         if not cands:
-            print("no backups found in", cfg.backups_dir)
+            print("no backups found in", cfg.backups_dir,
+                  file=sys.stderr if _want_json(a) else sys.stdout)
             bpath = ""
         else:
             bpath = cands[-1]
@@ -332,8 +435,7 @@ def cmd_audit(a, cfg, store, log):
         try:
             snap = json.load(open(bpath, encoding="utf-8"))
         except (OSError, ValueError) as e:
-            print("cannot read backup %s: %s" % (bpath, e))
-            return 2
+            return _err(a, "cannot read backup %s: %s" % (bpath, e))
         rows = snap.get("list") if isinstance(snap, dict) else snap
         before = {}
         for e in (rows.values() if isinstance(rows, dict) else rows or []):
@@ -341,6 +443,29 @@ def cmd_audit(a, cfg, store, log):
             if mid is not None and str(mid).isdigit():
                 before[int(mid)] = e
         d = audit.diff(before, live)
+        def _row(mid):
+            b, l = before.get(mid) or {}, live.get(mid) or {}
+            return {"mal_id": mid, "title": l.get("title") or b.get("title"),
+                    "was_watched": b.get("watched"), "was_status": b.get("status"),
+                    "watched": l.get("watched"), "status": l.get("status")}
+        payload["backup"] = {"path": bpath, "taken_at": (snap.get("backup_at") if isinstance(snap, dict) else None),
+                             "entries": len(before)}
+        payload["diff"] = {"before": d["before"], "after": d["after"],
+                           "untouched": d["untouched"],
+                           "added": [_row(m) for m in d["added"]],
+                           "changed": [_row(m) for m in d["changed"]],
+                           "removed": [_row(m) for m in d["removed"]]}
+        payload["unexplained"] = sorted(audit.moved_ids(d) - {i.get("mal_id") for i in items})
+    if _want_json(a):
+        _jout(payload)
+        return 1 if blocked else 0
+    print("plan    :", os.path.basename(path), "| hash", plan.get("hash"),
+          "|", len(items), "write(s)")
+    print("MAL list:", len(live), "entries")
+    lines = audit.format_findings(findings)
+    print("\n".join(lines) if lines else
+          "\nclean: every write matches MAL's own record of that entry")
+    if bpath:
         print("\nbackup  :", os.path.basename(bpath),
               "| taken", ts(snap.get("backup_at")) if isinstance(snap, dict) else "",
               "|", len(before), "entries")
@@ -429,6 +554,20 @@ def cmd_watch(a, cfg, store, log):
 
 
 def cmd_selftest(a, cfg, store, log):
+    if _want_json(a):
+        # selftest prints its own listing; keep stdout clean for the one JSON object
+        import contextlib
+        before = len(selftest.CHECKS)
+        with contextlib.redirect_stdout(sys.stderr):
+            fails = selftest.run(cfg, log, online=a.online)
+        checks = selftest.CHECKS[before:]
+        failures = selftest.FAILURES
+        _jout({"ok": not fails, "command": "selftest", "online": bool(a.online),
+               "checks": len(checks), "passed": len(checks) - len(failures),
+               "failures": list(failures)})
+        if fails:
+            log.error(f"selftest: {fails} check(s) failed - do not apply anything until this is fixed")
+        return 1 if fails else 0
     fails = selftest.run(cfg, log, online=a.online)
     if fails:
         log.error(f"selftest: {fails} check(s) failed - do not apply anything until this is fixed")

@@ -133,7 +133,25 @@ audit: nothing outside the planned writes moved
 `apply --skip-audit` exists for when MAL is unreachable. It skips precisely the check that
 stops a write aimed at the wrong entry, so use it knowingly.
 
-### Checking the code itself
+### Machine-readable output
+
+Everything a UI or a script needs is documented in [HANDOVER.md](HANDOVER.md). In short:
+
+```bash
+python plex_mal.py status --json      # health: Plex reachable? MAL authorised? when does it expire?
+python plex_mal.py plan --json        # the plan itself (same object as data/reports/*.json)
+python plex_mal.py audit --json       # findings + the before/after list diff
+python plex_mal.py selftest --json    # safety rails: {ok, checks, failures[]}
+python check_json.py                  # asserts this contract (stdout one JSON object, logs on stderr)
+```
+
+With `--json`, **stdout is exactly one JSON object** and every progress/diagnostic line goes
+to **stderr** — so a caller never has to parse a table, and a failure still says why on stderr
+and exits non-zero (`3` = the plan changed since you read it, `2` = can't run, `1` = a problem
+was found). `apply` needs no flag: its stdout is always JSON. `status --json` reports only
+*whether* the keys and tokens exist, never their values.
+
+## Checking the code itself
 
 ```bash
 python plex_mal.py selftest           # offline: no Plex, no MAL, no writes

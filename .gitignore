@@ -22,3 +22,5 @@ venv/
 # --- os --------------------------------------------------------------------
 Thumbs.db
 .DS_Store
+# scratch files a caller might drop next to the CLI
+.tmp_*
